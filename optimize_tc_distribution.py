@@ -161,18 +161,18 @@ class TriggerCellDistributor(tf.Module):
     def adapt_loss_parameters(self, epoch):
         """Changes the proportionality between the loss terms as a function of the epoch."""
         if self.pretrained:
-            initial_variance_loss_constant = 0.1
-            initial_equality_loss_constant = 1.
-            initial_wasserstein_loss_constant = 0.
-        else:
             initial_variance_loss_constant = 1.
-            initial_equality_loss_constant = 0.
-            initial_wasserstein_loss_constant = 0.
+            initial_equal_data_loss_constant = 1.
+            initial_equal_bins_loss_constant = 1.
+        else:
+            initial_variance_loss_constant = 0.
+            initial_equal_data_loss_constant = 1.
+            initial_equal_bins_loss_constant = 0.
             
         #variance_loss_constant = (1e-2, 1e-1, 1e-0, 1e1)
         variance_loss_constant = (initial_variance_loss_constant,)
-        wasserstein_loss_constant = tuple(initial_wasserstein_loss_constant for _ in range(len(variance_loss_constant)))
-        equality_loss_constant = tuple(initial_equality_loss_constant for _ in range(len(variance_loss_constant)))
+        equal_data_loss_constant = tuple(initial_equal_data_loss_constant for _ in range(len(variance_loss_constant)))
+        equal_bins_loss_constant = tuple(initial_equal_bins_loss_constant for _ in range(len(variance_loss_constant)))
         
         if self.pretrained:
             #thresholds = (100, 200, 300, 400,)
@@ -190,12 +190,12 @@ class TriggerCellDistributor(tf.Module):
             if epoch != loss_thresholds[i]:
                 continue
 
-            self.pars[0] = equality_loss_constant[i]
-            self.pars[1] = wasserstein_loss_constant[i]
+            self.pars[0] = equal_data_loss_constant[i]
+            self.pars[1] = equal_bins_loss_constant[i]
             self.pars[2] = variance_loss_constant[i]
 
-        loss_pars = {'equality_loss_constant': self.pars[0],
-                     'wasserstein_loss_constant': self.pars[1],
+        loss_pars = {'equal_data_loss_constant': self.pars[0],
+                     'equal_bins_loss_constant': self.pars[1],
                      'variance_loss_constant': self.pars[2] }
         return loss_pars, self.pars
 
@@ -221,12 +221,25 @@ class TriggerCellDistributor(tf.Module):
         Calculates the model's loss function. Receives slices in R/z as input.
         Each array value corresponds to a trigger cell.
         """
+        inbins = tf.cast(inbins, dtype=tf.float32)
+        outbins = tf.cast(outbins, dtype=tf.float32)
+
         opt = {'summarize': 10} #number of entries to print if assertion fails
         asserts = [ tf.debugging.Assert(indata.shape == outdata.shape, [indata.shape, outdata.shape], **opt) ]
         # asserts.append( tf.debugging.Assert(tf.math.reduce_min(inbins)==-self.boundary_width, [inbins], **opt) )
         # asserts.append( tf.debugging.Assert(tf.math.reduce_max(inbins)==self.nbinsphi-1, [inbins], **opt) )
                 
         with tf.control_dependencies(asserts):
+            # print(outdata)
+            # print(indata)
+            # print(outbins)
+            # print(inbins)
+            # print()
+            # print(outdata.shape)
+            # print(indata.shape)
+            # print(outbins.shape)
+            # print(inbins.shape)
+            # quit()
             data_equality_loss = tf.reduce_sum( tf.math.square(outdata-indata) )
             bins_equality_loss = tf.reduce_sum( tf.math.square(outbins-inbins) )
             bins_variance_loss = self._calc_local_loss(outbins)
@@ -238,24 +251,23 @@ class TriggerCellDistributor(tf.Module):
                 assert par >= 0.
                 loss_pars.append( tf.Variable(par, trainable=False) )
 
-        return { 'data_equality_loss': loss_pars[0] * data_equality_loss,
-                 'bins_equality_loss': loss_pars[1] * bins_equality_loss,
-                 #'wasserstein_loss':  loss_pars[1] * wasserstein_loss,
-                 'local_variance_loss': loss_pars[2] * variance_loss }
+        return { 'data_equality_loss':  loss_pars[0] * data_equality_loss,
+                 'bins_equality_loss':  loss_pars[1] * bins_equality_loss,
+                 'local_variance_loss': loss_pars[2] * bins_variance_loss }
 
     def _calc_local_loss(self, outbins):
         """
         Calculates the variance between adjacent bins.
         Adjacent here refers to the bin index, and not necessarily to physical location
         (I had to take into account circular boundary conditions).
-        Bins without entries do not affect the calulation.
+        Bins without entries do not affect the calculation.
         """
         variance_loss = 0
         if self.local_loss_mode == 'variance':
             pass
         elif self.local_loss_mode == 'diff':
             #take into account boundary conditions
-            diff = tf.concat((outbins[-1]-outbins[0], outbins[1:]-outbins[:-1]))
+            diff = tf.concat((tf.expand_dims(outbins[-1]-outbins[0], -1), outbins[1:]-outbins[:-1]), axis=0)
             diff = tf.reduce_sum(tf.math.square(diff))
             if not tf.math.is_nan(diff):
                 variance_loss += diff
@@ -285,20 +297,15 @@ class TriggerCellDistributor(tf.Module):
                                                                prediction_bins )
 
             original_data, original_bins = dp.postprocess(self.indata, self.inbins)
-
-            print(original_data.shape)
-            print(prediction_data.shape)
-            print(self.inbins.shape)
-            print(prediction_bins.shape)
-            quit()
-            losses = self.calc_loss(original_data, original_bins, prediction_data, prediction_bins)
+            original_counts = tf.math.bincount( tf.cast(original_bins, dtype=tf.int32) )
+            losses = self.calc_loss(original_data, original_counts, prediction_data, prediction_bins)
             loss_sum = tf.reduce_sum(list(losses.values()))
             
         gradients = tape.gradient(loss_sum, self.architecture.trainable_variables)
 
         self.optimizer.apply_gradients(zip(gradients, self.architecture.trainable_variables))
         self.train_loss(loss_sum)
-        return losses, original_data, original_bins, gradients, self.architecture.trainable_variables
+        return losses, prediction_data, prediction_bins, gradients, self.architecture.trainable_variables
 
     def save_architecture_diagram(self, name):
         """Plots the structure of the used architecture."""
@@ -368,16 +375,18 @@ def optimization(**kw):
 
     assert len(store_in.keys()) == 1
     dp = DataProcessing( phi_bounds=(kw['MinPhi'],kw['MaxPhi']),
-                         bin_bounds=(0,kw['NbinsPhi']-1) )
-    train_data, _, boundary_sizes = dp.preprocess( data=store_in['data'],
-                                                   nbins_phi=kw['NbinsPhi'],
-                                                   nbins_rz=kw['NbinsRz'],
-                                                   window_size=window_size )
+                         bin_bounds=(0,50) )
+    train_data, _, _ = dp.preprocess( data=store_in['data'],
+                                      nbins_phi=kw['NbinsPhi'],
+                                      nbins_rz=kw['NbinsRz'],
+                                      window_size=window_size )
     chosen_layer = 0
-    orig_data, orig_bins = dp.postprocess(train_data[chosen_layer][:,0],
-                                          train_data[chosen_layer][:,1])
+    orig_data, orig_bins = dp.postprocess( train_data[chosen_layer][:,0],
+                                           train_data[chosen_layer][:,1] )
 
-    plotter.save_orig_data(orig_data, boundary_sizes[chosen_layer])
+    orig_counts = np.bincount( orig_bins.astype(int) ).astype(float)
+    plotter.save_orig_data(data=orig_data, data_type='data', boundary_sizes=0) #boundary_sizes[chosen_layer]
+    plotter.save_orig_data(data=orig_counts, data_type='bins', boundary_sizes=0)
     
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     train_log_dir = 'logs/gradient_tape/' + current_time + '/train'
@@ -390,7 +399,8 @@ def optimization(**kw):
         tcd = TriggerCellDistributor(
             indata=tf.convert_to_tensor(rzslice[:,0], dtype=tf.float32),
             inbins=tf.convert_to_tensor(rzslice[:,1], dtype=tf.float32),
-            bound_size=boundary_sizes[i],
+            #bound_size=boundary_sizes[i],
+            bound_size=0,
             kernel_size=kw['KernelSize'],
             window_size=window_size,
             mode=mode,
@@ -427,8 +437,8 @@ def optimization(**kw):
                 writer=summary_writer,
             )
 
-            plotter.save_gen_data(outdata.numpy())
-            plotter.save_gen_bins(outbins.numpy())
+            plotter.save_gen_data(outdata.numpy(), boundary_sizes=0, data_type='data')
+            plotter.save_gen_data(outbins.numpy(), boundary_sizes=0, data_type='bins')
 
             if should_save:
                 plotter.plot(minval=-1, maxval=52, density=False, show_html=False)
