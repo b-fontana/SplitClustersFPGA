@@ -62,7 +62,7 @@ class Architecture(tf.keras.Model):
                              filters=16,
                              **conv_opt )
     
-        self.dense1 = Dense( units=500,
+        self.dense1 = Dense( units=200,
                              activation='selu',
                              name='first dense')
 
@@ -74,21 +74,21 @@ class Architecture(tf.keras.Model):
                              activation='selu',
                              name='output bins')
 
-    #@debug_tensor_shape(name='x', run=False)
+    #@debug_tensor_shape(name='x', run=True)
     def __call__(self, x):
-        tf.summary.trace_on()
+        # tf.summary.trace_on()
         x = tf.cast(x, dtype=tf.float32)
-        x = tf.reshape(x, shape=(-1, x.shape[0]))
-        x = self.dense1(x)
-        x = tf.reshape(x, shape=(-1, x.shape[1], 1))
+        x = tf.reshape(x, shape=(-1, x.shape[0], 1))
         x = self.conv1(x)
         x = tf.reshape(x, shape=(-1, x.shape[1]*x.shape[2]))
+        x = self.dense1(x)
+        x = tf.reshape(x, shape=(-1, x.shape[1]))
         x = self.dense2(x)
         outdata = tf.squeeze(x)
 
         x = self.dense3(x)
         outbins = tf.squeeze(x)
-        
+
         return outdata, outbins
 
 class TriggerCellDistributor(tf.Module):
@@ -138,12 +138,11 @@ class TriggerCellDistributor(tf.Module):
         #                                     )
 
         if not self.pretrained:
-            #self.learning_rates = (1e-4, 5e-5, 1e-5, 1e-6, 1e-7,)
-            self.learning_rates = (1e-3,)
-            self.lr_thresholds = (0,)
+            self.learning_rates = (1e-3, 1e-4, 1e-5, 1e-6, 1e-7,)
+            self.lr_thresholds = (0,400,700,1000,1300)
         else:
-            self.learning_rates = (1e-4, 1e-3)
-            self.lr_thresholds = (0, 50,)
+            self.learning_rates = (1e-7, 1e-6, 1e-5)
+            self.lr_thresholds = (0, 100, 200)
         assert len(self.lr_thresholds)==len(self.learning_rates)
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates[0])
@@ -160,14 +159,14 @@ class TriggerCellDistributor(tf.Module):
 
     def adapt_loss_parameters(self, epoch):
         """Changes the proportionality between the loss terms as a function of the epoch."""
-        if self.pretrained:
-            initial_variance_loss_constant = 1.
+        if self.pretrained: #1e-1, 1, 1 converges!
+            initial_variance_loss_constant = 1.e-1
             initial_equal_data_loss_constant = 1.
             initial_equal_bins_loss_constant = 1.
         else:
             initial_variance_loss_constant = 0.
             initial_equal_data_loss_constant = 1.
-            initial_equal_bins_loss_constant = 0.
+            initial_equal_bins_loss_constant = 1.
             
         #variance_loss_constant = (1e-2, 1e-1, 1e-0, 1e1)
         variance_loss_constant = (initial_variance_loss_constant,)
@@ -243,7 +242,6 @@ class TriggerCellDistributor(tf.Module):
             data_equality_loss = tf.reduce_sum( tf.math.square(outdata-indata) )
             bins_equality_loss = tf.reduce_sum( tf.math.square(outbins-inbins) )
             bins_variance_loss = self._calc_local_loss(outbins)
-            # wasserstein_loss = tensorflow_wasserstein_1d_loss(originaldata, outdata)
 
             loss_pars = []
             for par in self.pars:
@@ -264,13 +262,22 @@ class TriggerCellDistributor(tf.Module):
         """
         variance_loss = 0
         if self.local_loss_mode == 'variance':
-            pass
+            outbins_extended = tf.concat((outbins[-self.boundary_width:],
+                                          outbins), axis=-1)
+            frames = tf.signal.frame(outbins_extended,
+                                     frame_length=self.boundary_width+1,
+                                     frame_step=1)
+            # the following is NOT the same as `tf.math.reduce_variance(frames)`
+            var = tf.math.reduce_variance(frames, axis=-1)
+            var = tf.reduce_sum(var)
+            if not tf.math.is_nan(var):
+                variance_loss = var
         elif self.local_loss_mode == 'diff':
             #take into account boundary conditions
             diff = tf.concat((tf.expand_dims(outbins[-1]-outbins[0], -1), outbins[1:]-outbins[:-1]), axis=0)
             diff = tf.reduce_sum(tf.math.square(diff))
             if not tf.math.is_nan(diff):
-                variance_loss += diff
+                variance_loss = diff
         else:
             m = 'Mode {} is not supported.'.format(mode)
             raise ValueError('[_calc_local_loss]' + m)
@@ -283,7 +290,7 @@ class TriggerCellDistributor(tf.Module):
         # for n in tf.range(steps): # any future loop within one epoch is done here
         with tf.GradientTape() as tape:
             tape.watch(self.indata)
-            tape.watch(self.inbins)
+            #tape.watch(self.inbins)
 
             if self.pretrained and self.first_train:
                 self.restore_checkpoint()
@@ -293,18 +300,20 @@ class TriggerCellDistributor(tf.Module):
                 self.save_checkpoint()
 
             prediction_data, prediction_bins = self.architecture(self.indata)
-            prediction_data, prediction_bins = dp.postprocess( prediction_data,
-                                                               prediction_bins )
-
-            original_data, original_bins = dp.postprocess(self.indata, self.inbins)
-            original_counts = tf.math.bincount( tf.cast(original_bins, dtype=tf.int32) )
-            losses = self.calc_loss(original_data, original_counts, prediction_data, prediction_bins)
+            losses = self.calc_loss(self.indata, self.inbins, prediction_data, prediction_bins)
             loss_sum = tf.reduce_sum(list(losses.values()))
-            
+
+        # print([ x.name for x in self.architecture.trainable_variables ], flush=True)
         gradients = tape.gradient(loss_sum, self.architecture.trainable_variables)
 
         self.optimizer.apply_gradients(zip(gradients, self.architecture.trainable_variables))
         self.train_loss(loss_sum)
+
+        prediction_data, prediction_bins = dp.postprocess( prediction_data,
+                                                           prediction_bins )
+
+        original_data, original_bins = dp.postprocess(self.indata, self.inbins)
+
         return losses, prediction_data, prediction_bins, gradients, self.architecture.trainable_variables
 
     def save_architecture_diagram(self, name):
@@ -342,15 +351,18 @@ def save_scalar_logs(writer, scalar_map, epoch):
     Saves tensorflow info for Tensorboard visualization.
     `scalar_map` expects a dict of (scalar_name, scalar_value) pairs.
     """
-    not_losses = ('learning_rate',
-                  'equality_loss_constant', 'wasserstein_loss_constant',
-                  'variance_loss_constant')
+    are_losses = { 'data_equality_loss': 'equal_data_loss_constant',
+                   'bins_equality_loss': 'equal_bins_loss_constant',
+                   'local_variance_loss': 'variance_loss_constant' }
+    
     with writer.as_default():
         tot = 0
         for k,v in scalar_map.items():
-            tf.summary.scalar(k, v, step=epoch)
-            if k not in not_losses:
+            if k in are_losses.keys():
                 tot += v
+                tf.summary.scalar(k, v / scalar_map[ are_losses[k] ], step=epoch)
+            else:
+                tf.summary.scalar(k, v, step=epoch)
         tf.summary.scalar('total', tot, step=epoch)
 
 def save_gradient_logs(writer, gradients, train_variables, epoch):
@@ -363,42 +375,42 @@ def save_gradient_logs(writer, gradients, train_variables, epoch):
             tf.summary.histogram(
                 weights.name.replace(':', '_')+'_grads', data=grads, step=epoch)
 
-def save_graph(writer):
-    with writer.as_default():
-        tf.summary.trace_export('graph', 0)
+# def save_graph(writer):
+#     with writer.as_default():
+#         tf.summary.trace_export('graph', 0)
         
 def optimization(**kw):
     store_in  = h5py.File(kw['OptimizationIn'],  mode='r')
     plotter = Plotter(**optimization_kwargs)
-    mode = 'diff'
-    window_size = 3 if 'variance' in mode else 2 if mode == 'diff' else 0
+    mode = 'variance'
+    window_size = 3 if mode == 'variance' else 2 if mode == 'diff' else 0
 
     assert len(store_in.keys()) == 1
     dp = DataProcessing( phi_bounds=(kw['MinPhi'],kw['MaxPhi']),
                          bin_bounds=(0,50) )
-    train_data, _, _ = dp.preprocess( data=store_in['data'],
-                                      nbins_phi=kw['NbinsPhi'],
-                                      nbins_rz=kw['NbinsRz'],
-                                      window_size=window_size )
+    train_data, train_bins, _, _ = dp.preprocess( data=store_in['data'],
+                                                  nbins_phi=kw['NbinsPhi'],
+                                                  nbins_rz=kw['NbinsRz'],
+                                                  window_size=window_size )
     chosen_layer = 0
     orig_data, orig_bins = dp.postprocess( train_data[chosen_layer][:,0],
-                                           train_data[chosen_layer][:,1] )
+                                           train_bins[chosen_layer] )
 
-    orig_counts = np.bincount( orig_bins.astype(int) ).astype(float)
     plotter.save_orig_data(data=orig_data, data_type='data', boundary_sizes=0) #boundary_sizes[chosen_layer]
-    plotter.save_orig_data(data=orig_counts, data_type='bins', boundary_sizes=0)
+    plotter.save_orig_data(data=orig_bins, data_type='bins', boundary_sizes=0)
     
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     train_log_dir = 'logs/gradient_tape/' + current_time + '/train'
 
-    for i,rzslice in enumerate(train_data):
+    for i,(rzdata,rzbins) in enumerate(zip(train_data, train_bins)):
         if i!=chosen_layer:  #look at the first R/z slice only
             continue
         summary_writer = tf.summary.create_file_writer(train_log_dir)
 
         tcd = TriggerCellDistributor(
-            indata=tf.convert_to_tensor(rzslice[:,0], dtype=tf.float32),
-            inbins=tf.convert_to_tensor(rzslice[:,1], dtype=tf.float32),
+            indata=tf.convert_to_tensor(rzdata[:,0], dtype=tf.float32),
+            inbins=tf.convert_to_tensor(rzbins, dtype=tf.float32),
+
             #bound_size=boundary_sizes[i],
             bound_size=0,
             kernel_size=kw['KernelSize'],
@@ -417,7 +429,7 @@ def optimization(**kw):
             lr_map = tcd.adapt_learning_rate(epoch)
             dictloss, outdata, outbins, gradients, train_vars = tcd.train_step(dp,
                                                                                save=should_save)
-
+            
             scalar_map = dict(loss_pars_map)
             scalar_map.update(lr_map)
             scalar_map.update(dictloss)
@@ -433,15 +445,20 @@ def optimization(**kw):
                 train_variables=train_vars,
                 epoch=epoch
             )
-            save_graph(
-                writer=summary_writer,
-            )
+            # save_graph(
+            #     writer=summary_writer,
+            # )
 
             plotter.save_gen_data(outdata.numpy(), boundary_sizes=0, data_type='data')
             plotter.save_gen_data(outbins.numpy(), boundary_sizes=0, data_type='bins')
 
             if should_save:
-                plotter.plot(minval=-1, maxval=52, density=False, show_html=False)
+                plot_name = ( 'optimize_mode' + mode + '_ws' +
+                              str(window_size) + '_pretrain' +
+                              str(kw['Pretrained']) + '.html' )
+                plotter.plot(plot_name=plot_name,
+                             minval=-1, maxval=52,
+                             density=False, show_html=False)
 
         #plotter.plot(density=False, show_html=True)
 
@@ -485,7 +502,7 @@ if __name__ == "__main__":
                             'KernelSize': 10,
                             'OptimizationIn': os.path.join(os.environ['PWD'], DataFolder, 'triggergeom_condensed.hdf5'),
                             'OptimizationOut': 'None.hdf5',
-                            'Pretrained': False,
+                            'Pretrained': True,
                            }
 
     optimization( **optimization_kwargs )

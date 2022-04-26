@@ -7,6 +7,7 @@ import pandas as pd
 from bokeh.layouts import column
 from bokeh.models import CustomJS, Slider
 from bokeh.plotting import ColumnDataSource, figure, show, save
+from bokeh.io import output_file
 
 class Plotter:
     def __init__(self, outname='plots/plotter_out.hdf5', **kw):
@@ -16,6 +17,7 @@ class Plotter:
         self.gen_data = []
         self.gen_data_counts = []
         self.gen_bins_counts = []
+        self.gen_bins_counts_sum = []
         self.orig_data = None
         self.orig_data_counts = None
         self.orig_bins = None
@@ -79,6 +81,7 @@ class Plotter:
             self.gen_data.append(data)
         elif data_type == 'bins':
             self.gen_bins_counts.append(data)
+            self.gen_bins_counts_sum.append( np.sum(data) )
 
         if data_type == 'data':
             #find the overall min and max of the histogram to be plotted
@@ -92,7 +95,7 @@ class Plotter:
             _bincounts = _bincounts[1:-1] #do not plot out-of-bound values
         elif data_type == 'bins':
             _bincounts = data
-            
+
         if self.plot_max < np.max(_bincounts):
             self.plot_max = np.max(_bincounts)
         if self.plot_min > np.min(_bincounts):
@@ -118,6 +121,7 @@ class Plotter:
         assert self.orig_data_counts is not None
         assert len(self.gen_data_counts) > 0
         assert len(self.gen_bins_counts) > 0
+        assert len(self.gen_bins_counts_sum) > 0
         logpad = 1e-4
 
         # if the out bin number is larger than `NbinsPhi` (makes no sense but can happen)
@@ -201,7 +205,7 @@ class Plotter:
         plot_distr.circle('curr_x', 'curr_y', source=s_data_counts,
                           legend_label='Data Output', color='red')
         plot_distr.triangle('curr_x', 'curr_y', source=s_bins_counts,
-                          legend_label='Bins Output', color='orange')
+                            legend_label='Bins Output', color='orange')
         plot_distr.legend.click_policy='hide'
 
         callback = CustomJS(args=dict(s1=s_data_counts, s2=s_diff, s3=s_bins_counts),
@@ -241,14 +245,21 @@ class Plotter:
                         fill_color='navy', line_color='white', alpha=0.5,
                         source=s_diff )
 
+        plot_count = figure(**plot_opt)
+        plot_count.line(np.arange(len(self.gen_bins_counts_sum)),
+                        self.gen_bins_counts_sum, 
+                        legend_label='Bin Output Count Sum',
+                        color='black')
+
         slider = Slider(start=0, end=len(self.gen_data),
                         value=0, step=1., title='Epoch')
         slider.js_on_change('value', callback)
 
-        layout = column( slider, plot_distr, plot_diff )
+        layout = column( slider, plot_distr, plot_diff, plot_count )
         if show_html:
             show(layout)
         else:
+            output_file(plot_name)
             save(layout)
             
 

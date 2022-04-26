@@ -7,19 +7,18 @@ class DataProcessing:
     def __init__(self, phi_bounds, bin_bounds):
         self.max_bound = 1.
         self.min_bound = 0.
-        diff_bound = self.max_bound-self.min_bound
+        self.diff_bound = self.max_bound-self.min_bound
         self.shift_phi = np.pi #shift the phi range to [0; 2*Pi[
-        self.shift_bin = 0.
         self.phi_bounds = tuple( x + self.shift_phi for x in phi_bounds )
-        self.bin_bounds = tuple( x + self.shift_bin for x in bin_bounds )
 
         #get parameters for the linear transformation (set between 0 and 1)
-        self.a_norm_phi = diff_bound / (self.phi_bounds[1]-self.phi_bounds[0])
+        self.a_norm_phi = self.diff_bound / (self.phi_bounds[1]-self.phi_bounds[0])
         self.b_norm_phi = self.max_bound - self.a_norm_phi * self.phi_bounds[1]
-        
-        self.a_norm_bin = diff_bound / (self.bin_bounds[1]-self.bin_bounds[0])
+
+        self.bin_bounds = bin_bounds
+        self.a_norm_bin = self.diff_bound / (self.bin_bounds[1] - self.bin_bounds[0])
         self.b_norm_bin = self.max_bound - self.a_norm_bin * self.bin_bounds[1]
-                
+        
     def preprocess( self, data,
                     nbins_phi,
                     nbins_rz,
@@ -35,25 +34,23 @@ class DataProcessing:
 
         data = data[()] #eager (lazy is the default)
 
-        def _drop_columns(data, data_with_boundaries, idxs):
+        def _drop_columns_data(data, data_with_boundaries, idxs):
             """Drops the columns specified by indexes `idxs`, overriding data arrays."""
             drop = lambda d,obj: np.delete(d, obj=obj, axis=1)
             data = [drop(x, idxs) for x in data]
             data_with_boundaries = [drop(x, idxs) for x in data_with_boundaries]
             return data, data_with_boundaries
 
-        def _shift(data, index):
+        def _shift_data(data, index):
             """
             Shift data. Originally meant to avoid negative values.
             """
             if index == phi_idx:
                 data[:,index] += self.shift_phi
-            elif index == phibin_idx:
-                data[:,index] += self.shift_bin
             assert len(data[:,index][ data[:,index] < self.min_bound ]) == 0
             return data
 
-        def _split(data, split_index, sort_index, nbins_rz):
+        def _split_data(data, split_index, sort_index, nbins_rz):
             """
             Creates a list of R/z slices, each ordered by phi.
             """
@@ -81,19 +78,17 @@ class DataProcessing:
 
             return data
 
-        def _normalize(data, index):
+        def _normalize_data(data, index):
             """
             Standard max-min normalization of column `index`.
             """
             if index == phi_idx:
                 data[:,index] = self.a_norm_phi * data[:,index] + self.b_norm_phi
-            elif index == phibin_idx:
-                data[:,index] = self.a_norm_bin * data[:,index] + self.b_norm_bin
             else:
                 raise ValueError()
             return data
 
-        def _set_boundary_conditions(data, window_size, phibin_idx, nbins_phi):
+        def _set_boundary_conditions_data(data, window_size, phibin_idx, nbins_phi):
             """
             Pad the original data to ensure boundary conditions over its Phi dimension.
             The boundary is done in terms of bins, not single trigger cells.
@@ -110,41 +105,43 @@ class DataProcessing:
 
             return data, data_with_boundaries, boundary_sizes
 
-        data = _shift(
+        data = _shift_data(
             data,
             index=phi_idx
         )
-        data = _shift(
-            data,
-            index=phibin_idx
-        )
-        data = _normalize(
+        data = _normalize_data(
             data,
             index=phi_idx
         )
-        data = _normalize(
-            data,
-            index=phibin_idx
-        )
-        data = _split(
+        data = _split_data(
             data,
             split_index=rzbin_idx,
             sort_index=phibin_idx,
             nbins_rz=nbins_rz
         )
-        data, data_with_boundaries, boundary_sizes = _set_boundary_conditions(
+        data, data_with_boundaries, boundary_sizes = _set_boundary_conditions_data(
             data,
             window_size,
             phibin_idx,
             nbins_phi
         )
-        data, data_with_boundaries = _drop_columns(
+        data, data_with_boundaries = _drop_columns_data(
             data,
             data_with_boundaries,
             idxs=[rz_idx, rzbin_idx]
         )
 
-        return data, data_with_boundaries, boundary_sizes
+        bins = []
+        for rzslice in data:
+            tmp = rzslice[:,1].astype(int)
+            tmp = np.bincount( tmp )
+
+            #normalization
+            tmp = self.a_norm_bin * tmp + self.b_norm_bin
+            
+            bins.append(tmp)
+
+        return data, bins, data_with_boundaries, boundary_sizes
 
     def postprocess(self, data, bins):
         """Adapt the output of the neural network."""
@@ -158,7 +155,7 @@ class DataProcessing:
         def _deshift(data, bins):
             """Opposite of preprocess._normalize()."""
             new_data = data - self.shift_phi
-            new_bins = bins - self.shift_bin
+            new_bins = bins
             return new_data, new_bins
 
         new_data, new_bins = _denormalize(
