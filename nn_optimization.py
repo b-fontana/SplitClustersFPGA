@@ -14,19 +14,6 @@ from data_processing import DataProcessing
 from plotter import Plotter
 from debug_architecture import debug_tensor_shape
 
-def are_tensors_equal(t1, t2):
-    assert t1.shape == t2.shape
-    return tf.math.count_nonzero(tf.math.equal(t1,t2))==t1.shape
-        
-# def tensorflow_assignment(tensor, mask, lambda_op):
-#     """
-#     Emulate assignment by creating a new tensor.
-#     The mask must be 1 where the assignment is intended, 0 everywhere else.
-#     """
-#     assert tensor.shape == mask.shape
-#     other = lambda_op(tensor)
-#     return tensor * (1 - mask) + other * mask
-
 def tensorflow_wasserstein_1d_loss(indata, outdata):
     """Calculates the 1D earth-mover's distance."""
     loss = tf.cumsum(indata) - tf.cumsum(outdata)
@@ -202,9 +189,16 @@ class TriggerCellDistributor(tf.Module):
         """
         Using the Adam optimizer the following will control the base learning rate, 
         not the effective one, which is adaptive.
-        """               
-        # custom learning rate schedule
-        for i in range(len(self.lr_thresholds)):
+        """
+        learning_rates = (1e-4, 5e-5, 1e-5, 1e-6, 1e-7,)
+        
+        if not self.pretrained:
+            thresholds = (300, 500, 700, 1000, 1300,)
+            assert len(thresholds)==len(learning_rates)
+
+            # make sure the initial learning rate is the largest
+            for elem in learning_rates:
+                assert self.init_lr > elem
 
             #change the learning rate only at the threshold
             #let Adam schedule it during the rest of the time

@@ -22,7 +22,8 @@ class DataProcessing:
     def preprocess( self, data,
                     nbins_phi,
                     nbins_rz,
-                    window_size ):
+                    window_size,
+                    normalize=True ):
         """Prepare the data to serve as input to the net in R/z slices"""
         # data variables' indexes
         assert data.attrs['columns'].tolist() == ['Rz', 'phi', 'Rz_bin', 'phi_bin']
@@ -105,14 +106,15 @@ class DataProcessing:
 
             return data, data_with_boundaries, boundary_sizes
 
-        data = _shift_data(
-            data,
-            index=phi_idx
-        )
-        data = _normalize_data(
-            data,
-            index=phi_idx
-        )
+        if normalize:
+            data = _shift_data(
+                data,
+                index=phi_idx
+            )
+            data = _normalize_data(
+                data,
+                index=phi_idx
+            )
         data = _split_data(
             data,
             split_index=rzbin_idx,
@@ -137,7 +139,8 @@ class DataProcessing:
             tmp = np.bincount( tmp )
 
             #normalization
-            tmp = self.a_norm_bin * tmp + self.b_norm_bin
+            if normalize:
+                tmp = self.a_norm_bin * tmp + self.b_norm_bin
             
             bins.append(tmp)
 
